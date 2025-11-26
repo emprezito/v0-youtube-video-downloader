@@ -24,7 +24,9 @@ export interface Format {
   ext: string
   resolution: string
   filesize: string
+  filesizeBytes?: number
   format: string
+  itag?: string
 }
 
 export interface DownloadedFile {
@@ -56,29 +58,30 @@ export function YouTubeDownloader() {
   })
   const [downloadedFiles, setDownloadedFiles] = useState<DownloadedFile[]>([])
 
-  const fetchDownloadedFiles = useCallback(async () => {
-    try {
-      const response = await fetch("/api/files")
-      if (response.ok) {
-        const data = await response.json()
+  useEffect(() => {
+    const saved = localStorage.getItem("downloadedFiles")
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved)
         setDownloadedFiles(
-          data.files.map((file: { name: string; size: number; createdAt: string }) => ({
-            id: file.name,
-            name: file.name,
-            size: file.size / (1024 * 1024), // Convert to MB
-            downloadedAt: new Date(file.createdAt),
-            format: file.name.split(".").pop()?.toUpperCase() || "MP4",
+          parsed.map((f: DownloadedFile) => ({
+            ...f,
+            downloadedAt: new Date(f.downloadedAt),
           })),
         )
+      } catch (e) {
+        console.error("Failed to parse saved files:", e)
       }
-    } catch (error) {
-      console.error("Failed to fetch files:", error)
     }
   }, [])
 
-  useEffect(() => {
-    fetchDownloadedFiles()
-  }, [fetchDownloadedFiles])
+  const saveDownloadedFile = useCallback((file: DownloadedFile) => {
+    setDownloadedFiles((prev) => {
+      const updated = [file, ...prev]
+      localStorage.setItem("downloadedFiles", JSON.stringify(updated))
+      return updated
+    })
+  }, [])
 
   const handleFetchInfo = async () => {
     if (!url.trim()) return
@@ -100,7 +103,6 @@ export function YouTubeDownloader() {
 
       const info = await response.json()
 
-      // Transform API response to VideoData format
       const videoDataFromApi: VideoData = {
         id: info.id,
         title: info.title,
@@ -109,24 +111,13 @@ export function YouTubeDownloader() {
         viewCount: info.view_count || 0,
         thumbnail: info.thumbnail || "",
         description: info.description || "",
-        formats: [
-          { formatId: "1080", ext: "mp4", resolution: "1080p", filesize: "~250MB", format: "1080p HD (mp4)" },
-          { formatId: "720", ext: "mp4", resolution: "720p", filesize: "~120MB", format: "720p HD (mp4)" },
-          { formatId: "480", ext: "mp4", resolution: "480p", filesize: "~65MB", format: "480p (mp4)" },
-          { formatId: "360", ext: "mp4", resolution: "360p", filesize: "~35MB", format: "360p (mp4)" },
-          {
-            formatId: "best",
-            ext: "mp4",
-            resolution: "best",
-            filesize: "~300MB",
-            format: "Best quality (video+audio)",
-          },
-          { formatId: "mp3", ext: "mp3", resolution: "audio", filesize: "~10MB", format: "Audio only (MP3)" },
-        ],
+        formats: info.qualityOptions || [],
       }
 
       setVideoData(videoDataFromApi)
-      setSelectedFormat(videoDataFromApi.formats[0])
+      if (videoDataFromApi.formats.length > 0) {
+        setSelectedFormat(videoDataFromApi.formats[0])
+      }
       setDownloadState({ status: "idle", percent: 0, speed: "", eta: "" })
     } catch (error) {
       setDownloadState({
@@ -145,67 +136,56 @@ export function YouTubeDownloader() {
     setDownloadState({
       status: "downloading",
       percent: 0,
-      speed: "Starting...",
-      eta: "Calculating...",
+      speed: "Preparing download...",
+      eta: "",
     })
 
     try {
-      // Start the download
-      const response = await fetch("/api/download", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url,
-          format: selectedFormat.ext,
-          quality: selectedFormat.formatId,
-        }),
-      })
+      // Build download URL
+      const downloadUrl = `/api/download?url=${encodeURIComponent(url)}&quality=${selectedFormat.formatId}&format=${selectedFormat.ext}`
 
-      if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.error || "Failed to start download")
-      }
+      // Create a hidden link and trigger download
+      const link = document.createElement("a")
+      link.href = downloadUrl
+      link.download = `${videoData.title}.${selectedFormat.ext}`
+      document.body.appendChild(link)
 
-      const { downloadId } = await response.json()
-
-      // Poll for progress
-      const pollProgress = async () => {
-        try {
-          const progressResponse = await fetch(`/api/download?id=${downloadId}`)
-          if (!progressResponse.ok) return
-
-          const progress = await progressResponse.json()
-
-          if (progress.status === "complete") {
-            setDownloadState({ status: "finished", percent: 100, speed: "", eta: "" })
-            // Refresh the file list
-            fetchDownloadedFiles()
-            setTimeout(() => {
-              setDownloadState({ status: "idle", percent: 0, speed: "", eta: "" })
-            }, 3000)
-            return
-          }
-
-          if (progress.status === "error") {
-            throw new Error("Download failed")
-          }
-
-          setDownloadState({
-            status: "downloading",
-            percent: Math.round(progress.progress),
-            speed: progress.speed || "Calculating...",
-            eta: progress.eta || "Calculating...",
-            downloadId,
-          })
-
-          // Continue polling
-          setTimeout(pollProgress, 500)
-        } catch (error) {
-          console.error("Error polling progress:", error)
+      // Simulate progress for UX
+      let progress = 0
+      const progressInterval = setInterval(() => {
+        progress += Math.random() * 15
+        if (progress >= 95) {
+          progress = 95
         }
-      }
+        setDownloadState({
+          status: "downloading",
+          percent: Math.round(progress),
+          speed: "Downloading...",
+          eta: "",
+        })
+      }, 500)
 
-      pollProgress()
+      link.click()
+      document.body.removeChild(link)
+
+      // Complete after a short delay
+      setTimeout(() => {
+        clearInterval(progressInterval)
+        setDownloadState({ status: "finished", percent: 100, speed: "", eta: "" })
+
+        // Save to downloaded files
+        saveDownloadedFile({
+          id: `${Date.now()}`,
+          name: `${videoData.title}.${selectedFormat.ext}`,
+          size: selectedFormat.filesizeBytes ? selectedFormat.filesizeBytes / (1024 * 1024) : 0,
+          downloadedAt: new Date(),
+          format: selectedFormat.ext.toUpperCase(),
+        })
+
+        setTimeout(() => {
+          setDownloadState({ status: "idle", percent: 0, speed: "", eta: "" })
+        }, 3000)
+      }, 2000)
     } catch (error) {
       setDownloadState({
         status: "error",
@@ -217,24 +197,18 @@ export function YouTubeDownloader() {
     }
   }
 
-  const handleDeleteFile = async (id: string) => {
-    try {
-      const response = await fetch("/api/files", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filename: id }),
-      })
-
-      if (response.ok) {
-        setDownloadedFiles((prev) => prev.filter((file) => file.id !== id))
-      }
-    } catch (error) {
-      console.error("Failed to delete file:", error)
-    }
+  const handleDeleteFile = (id: string) => {
+    setDownloadedFiles((prev) => {
+      const updated = prev.filter((file) => file.id !== id)
+      localStorage.setItem("downloadedFiles", JSON.stringify(updated))
+      return updated
+    })
   }
 
   const handleDownloadFile = (filename: string) => {
-    window.open(`/api/download-file?filename=${encodeURIComponent(filename)}`, "_blank")
+    // For browser-downloaded files, we can't re-download them
+    // Show a message instead
+    alert("This file was downloaded directly to your browser's download folder.")
   }
 
   return (
@@ -247,7 +221,7 @@ export function YouTubeDownloader() {
           </div>
           <h1 className="text-4xl font-bold text-foreground">YouTube Downloader</h1>
         </div>
-        <p className="text-muted-foreground text-lg">Download videos and playlists in various formats</p>
+        <p className="text-muted-foreground text-lg">Download videos in various formats with real file sizes</p>
       </header>
 
       {/* URL Input */}

@@ -1,7 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server"
-import ytdl from "@distube/ytdl-core"
+import { spawn } from "child_process"
+import path from "path"
+import fs from "fs"
 
-// Store download progress
+// Store download progress for each download
 const downloadProgress = new Map<string, { progress: number; speed: string; eta: string; status: string }>()
 
 export async function POST(request: NextRequest) {
@@ -12,21 +14,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "URL is required" }, { status: 400 })
     }
 
-    if (!ytdl.validateURL(url)) {
-      return NextResponse.json({ error: "Invalid YouTube URL" }, { status: 400 })
+    const downloadId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    const downloadsDir = path.join(process.cwd(), "downloads")
+
+    // Create downloads directory if it doesn't exist
+    if (!fs.existsSync(downloadsDir)) {
+      fs.mkdirSync(downloadsDir, { recursive: true })
     }
 
-    const downloadId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    // Start download in background
+    startDownload(downloadId, url, format, quality, downloadsDir)
 
-    // Initialize progress
-    downloadProgress.set(downloadId, {
-      progress: 0,
-      speed: "Starting...",
-      eta: "Calculating...",
-      status: "starting",
-    })
-
-    return NextResponse.json({ downloadId, message: "Download ready" })
+    return NextResponse.json({ downloadId, message: "Download started" })
   } catch (error) {
     console.error("Error starting download:", error)
     return NextResponse.json(
@@ -36,91 +35,92 @@ export async function POST(request: NextRequest) {
   }
 }
 
-export async function GET(request: NextRequest) {
-  const downloadId = request.nextUrl.searchParams.get("id")
-  const url = request.nextUrl.searchParams.get("url")
-  const quality = request.nextUrl.searchParams.get("quality")
-  const format = request.nextUrl.searchParams.get("format")
+function startDownload(downloadId: string, url: string, format: string, quality: string, downloadsDir: string) {
+  const args: string[] = ["--newline", "--progress", "-o", path.join(downloadsDir, "%(title)s.%(ext)s")]
 
-  // If URL is provided, stream the download
-  if (url) {
-    try {
-      if (!ytdl.validateURL(url)) {
-        return NextResponse.json({ error: "Invalid YouTube URL" }, { status: 400 })
-      }
-
-      const info = await ytdl.getInfo(url)
-      const title = info.videoDetails.title.replace(/[^\w\s-]/g, "").trim()
-
-      let ytdlOptions: ytdl.downloadOptions = {}
-
-      if (format === "mp3") {
-        ytdlOptions = { quality: "highestaudio", filter: "audioonly" }
-      } else {
-        switch (quality) {
-          case "1080":
-            ytdlOptions = { quality: "highestvideo", filter: "videoandaudio" }
-            break
-          case "720":
-            ytdlOptions = {
-              filter: (f) => f.qualityLabel === "720p" && f.hasAudio && f.hasVideo,
-            }
-            break
-          case "480":
-            ytdlOptions = {
-              filter: (f) => f.qualityLabel === "480p" && f.hasAudio && f.hasVideo,
-            }
-            break
-          case "360":
-            ytdlOptions = {
-              filter: (f) => f.qualityLabel === "360p" && f.hasAudio && f.hasVideo,
-            }
-            break
-          default:
-            ytdlOptions = { quality: "highest", filter: "videoandaudio" }
-        }
-      }
-
-      // Fallback to any format with audio+video if specific quality not found
-      const availableFormats = info.formats.filter((f) => f.hasAudio && f.hasVideo)
-      if (availableFormats.length === 0 && format !== "mp3") {
-        ytdlOptions = { quality: "highest" }
-      }
-
-      const stream = ytdl(url, ytdlOptions)
-      const ext = format === "mp3" ? "mp3" : "mp4"
-      const filename = `${title}.${ext}`
-
-      // Convert Node stream to web stream
-      const webStream = new ReadableStream({
-        start(controller) {
-          stream.on("data", (chunk) => controller.enqueue(chunk))
-          stream.on("end", () => controller.close())
-          stream.on("error", (err) => controller.error(err))
-        },
-      })
-
-      return new NextResponse(webStream, {
-        headers: {
-          "Content-Type": format === "mp3" ? "audio/mpeg" : "video/mp4",
-          "Content-Disposition": `attachment; filename="${encodeURIComponent(filename)}"`,
-        },
-      })
-    } catch (error) {
-      console.error("Download error:", error)
-      return NextResponse.json({ error: error instanceof Error ? error.message : "Download failed" }, { status: 500 })
+  // Add format-specific arguments
+  if (format === "mp3") {
+    args.push("-x", "--audio-format", "mp3", "--audio-quality", "0")
+  } else {
+    // Video format based on quality
+    switch (quality) {
+      case "1080":
+        args.push("-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]")
+        break
+      case "720":
+        args.push("-f", "bestvideo[height<=720]+bestaudio/best[height<=720]")
+        break
+      case "480":
+        args.push("-f", "bestvideo[height<=480]+bestaudio/best[height<=480]")
+        break
+      case "360":
+        args.push("-f", "bestvideo[height<=360]+bestaudio/best[height<=360]")
+        break
+      default:
+        args.push("-f", "bestvideo+bestaudio/best")
     }
+    args.push("--merge-output-format", "mp4")
   }
 
-  // Otherwise return progress
+  args.push(url)
+
+  downloadProgress.set(downloadId, { progress: 0, speed: "", eta: "", status: "starting" })
+
+  const process = spawn("yt-dlp", args)
+
+  process.stdout.on("data", (data) => {
+    const output = data.toString()
+    const progressMatch = output.match(/(\d+\.?\d*)%/)
+    const speedMatch = output.match(/at\s+([\d.]+\s*\w+\/s)/)
+    const etaMatch = output.match(/ETA\s+([\d:]+)/)
+
+    if (progressMatch) {
+      downloadProgress.set(downloadId, {
+        progress: Number.parseFloat(progressMatch[1]),
+        speed: speedMatch ? speedMatch[1] : "",
+        eta: etaMatch ? etaMatch[1] : "",
+        status: "downloading",
+      })
+    }
+  })
+
+  process.stderr.on("data", (data) => {
+    console.error("yt-dlp stderr:", data.toString())
+  })
+
+  process.on("close", (code) => {
+    if (code === 0) {
+      downloadProgress.set(downloadId, { progress: 100, speed: "", eta: "", status: "complete" })
+    } else {
+      downloadProgress.set(downloadId, { progress: 0, speed: "", eta: "", status: "error" })
+    }
+
+    // Clean up progress after 5 minutes
+    setTimeout(
+      () => {
+        downloadProgress.delete(downloadId)
+      },
+      5 * 60 * 1000,
+    )
+  })
+
+  process.on("error", (error) => {
+    console.error("Failed to start yt-dlp:", error)
+    downloadProgress.set(downloadId, { progress: 0, speed: "", eta: "", status: "error" })
+  })
+}
+
+export async function GET(request: NextRequest) {
+  const downloadId = request.nextUrl.searchParams.get("id")
+
   if (!downloadId) {
-    return NextResponse.json({ error: "Download ID or URL is required" }, { status: 400 })
+    return NextResponse.json({ error: "Download ID is required" }, { status: 400 })
   }
 
   const progress = downloadProgress.get(downloadId)
 
   if (!progress) {
-    return NextResponse.json({ progress: 100, status: "complete" })
+    return NextResponse.json({ error: "Download not found" }, { status: 404 })
   }
 
   return NextResponse.json(progress)

@@ -9,7 +9,6 @@
     "start": "next start"
   },
   "dependencies": {
-    "@distube/ytdl-core": "latest",
     "@hookform/resolvers": "^3.10.0",
     "@radix-ui/react-accordion": "1.2.2",
     "@radix-ui/react-alert-dialog": "1.1.4",
@@ -40,7 +39,7 @@
     "@radix-ui/react-tooltip": "1.1.6",
     "@vercel/analytics": "latest",
     "autoprefixer": "^10.4.20",
-    "child_process": "1.0.2",
+    "child_process": "latest",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "1.0.4",
@@ -50,7 +49,7 @@
     "input-otp": "1.4.1",
     "lucide-react": "^0.454.0",
     "next": "16.0.3",
-    "next-themes": "^0.4.6",
+    "next-themes": "latest",
     "path": "latest",
     "react": "19.2.0",
     "react-day-picker": "9.8.0",

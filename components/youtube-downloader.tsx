@@ -36,12 +36,13 @@ export interface DownloadedFile {
 }
 
 export interface DownloadState {
-  status: "idle" | "fetching" | "downloading" | "finished" | "error"
+  status: "idle" | "fetching" | "downloading" | "merging" | "finished" | "error"
   percent: number
   speed: string
   eta: string
   error?: string
   downloadId?: string
+  filename?: string
 }
 
 export function YouTubeDownloader() {
@@ -65,7 +66,7 @@ export function YouTubeDownloader() {
           data.files.map((file: { name: string; size: number; createdAt: string }) => ({
             id: file.name,
             name: file.name,
-            size: file.size / (1024 * 1024), // Convert to MB
+            size: file.size / (1024 * 1024),
             downloadedAt: new Date(file.createdAt),
             format: file.name.split(".").pop()?.toUpperCase() || "MP4",
           })),
@@ -100,7 +101,8 @@ export function YouTubeDownloader() {
 
       const info = await response.json()
 
-      // Transform API response to VideoData format
+      const fileSizes = info.fileSizes || {}
+
       const videoDataFromApi: VideoData = {
         id: info.id,
         title: info.title,
@@ -110,18 +112,48 @@ export function YouTubeDownloader() {
         thumbnail: info.thumbnail || "",
         description: info.description || "",
         formats: [
-          { formatId: "1080", ext: "mp4", resolution: "1080p", filesize: "~250MB", format: "1080p HD (mp4)" },
-          { formatId: "720", ext: "mp4", resolution: "720p", filesize: "~120MB", format: "720p HD (mp4)" },
-          { formatId: "480", ext: "mp4", resolution: "480p", filesize: "~65MB", format: "480p (mp4)" },
-          { formatId: "360", ext: "mp4", resolution: "360p", filesize: "~35MB", format: "360p (mp4)" },
+          {
+            formatId: "1080",
+            ext: "mp4",
+            resolution: "1080p",
+            filesize: fileSizes["1080"] || "Unknown",
+            format: "1080p HD (mp4)",
+          },
+          {
+            formatId: "720",
+            ext: "mp4",
+            resolution: "720p",
+            filesize: fileSizes["720"] || "Unknown",
+            format: "720p HD (mp4)",
+          },
+          {
+            formatId: "480",
+            ext: "mp4",
+            resolution: "480p",
+            filesize: fileSizes["480"] || "Unknown",
+            format: "480p (mp4)",
+          },
+          {
+            formatId: "360",
+            ext: "mp4",
+            resolution: "360p",
+            filesize: fileSizes["360"] || "Unknown",
+            format: "360p (mp4)",
+          },
           {
             formatId: "best",
             ext: "mp4",
             resolution: "best",
-            filesize: "~300MB",
+            filesize: fileSizes["best"] || "Unknown",
             format: "Best quality (video+audio)",
           },
-          { formatId: "mp3", ext: "mp3", resolution: "audio", filesize: "~10MB", format: "Audio only (MP3)" },
+          {
+            formatId: "mp3",
+            ext: "mp3",
+            resolution: "audio",
+            filesize: fileSizes["mp3"] || "Unknown",
+            format: "Audio only (MP3)",
+          },
         ],
       }
 
@@ -150,7 +182,6 @@ export function YouTubeDownloader() {
     })
 
     try {
-      // Start the download
       const response = await fetch("/api/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -177,9 +208,21 @@ export function YouTubeDownloader() {
           const progress = await progressResponse.json()
 
           if (progress.status === "complete") {
-            setDownloadState({ status: "finished", percent: 100, speed: "", eta: "" })
+            setDownloadState({
+              status: "finished",
+              percent: 100,
+              speed: "",
+              eta: "",
+              filename: progress.filename,
+            })
+
             // Refresh the file list
             fetchDownloadedFiles()
+
+            if (progress.filename) {
+              window.open(`/api/download-file?filename=${encodeURIComponent(progress.filename)}`, "_blank")
+            }
+
             setTimeout(() => {
               setDownloadState({ status: "idle", percent: 0, speed: "", eta: "" })
             }, 3000)
@@ -191,11 +234,12 @@ export function YouTubeDownloader() {
           }
 
           setDownloadState({
-            status: "downloading",
+            status: progress.status === "merging" ? "merging" : "downloading",
             percent: Math.round(progress.progress),
             speed: progress.speed || "Calculating...",
             eta: progress.eta || "Calculating...",
             downloadId,
+            filename: progress.filename,
           })
 
           // Continue polling
@@ -267,17 +311,25 @@ export function YouTubeDownloader() {
           {/* Download Button */}
           <button
             onClick={handleDownload}
-            disabled={downloadState.status === "downloading" || downloadState.status === "fetching"}
+            disabled={
+              downloadState.status === "downloading" ||
+              downloadState.status === "fetching" ||
+              downloadState.status === "merging"
+            }
             className="w-full py-4 px-6 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold rounded-xl transition-all duration-200 flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Download className="w-5 h-5" />
-            {downloadState.status === "downloading" ? "Downloading..." : "Download Video"}
+            {downloadState.status === "downloading"
+              ? "Downloading..."
+              : downloadState.status === "merging"
+                ? "Merging video & audio..."
+                : "Download Video"}
           </button>
 
           {/* Download Progress */}
-          {(downloadState.status === "downloading" || downloadState.status === "finished") && (
-            <DownloadProgress downloadState={downloadState} />
-          )}
+          {(downloadState.status === "downloading" ||
+            downloadState.status === "merging" ||
+            downloadState.status === "finished") && <DownloadProgress downloadState={downloadState} />}
         </div>
       )}
 

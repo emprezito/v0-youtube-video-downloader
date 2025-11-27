@@ -20,6 +20,15 @@ export async function POST(request: NextRequest) {
   }
 }
 
+function formatFileSize(bytes: number | null | undefined): string {
+  if (!bytes || bytes <= 0) return "Unknown"
+  const mb = bytes / (1024 * 1024)
+  if (mb >= 1024) {
+    return `${(mb / 1024).toFixed(1)} GB`
+  }
+  return `${mb.toFixed(1)} MB`
+}
+
 function getVideoInfo(url: string): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const args = ["--dump-json", "--no-playlist", url]
@@ -40,6 +49,36 @@ function getVideoInfo(url: string): Promise<Record<string, unknown>> {
       if (code === 0) {
         try {
           const info = JSON.parse(stdout)
+
+          const allFormats = info.formats || []
+
+          // Find best formats for each quality with their file sizes
+          const findBestVideoFormat = (maxHeight: number) => {
+            // Look for formats with both video and audio first (progressive)
+            const progressive = allFormats.find(
+              (f: any) => f.height && f.height <= maxHeight && f.acodec !== "none" && f.vcodec !== "none",
+            )
+            if (progressive?.filesize) return progressive.filesize
+
+            // Otherwise estimate from separate video + audio streams
+            const videoFormat = allFormats.find(
+              (f: any) => f.height && f.height <= maxHeight && f.height > maxHeight - 200 && f.vcodec !== "none",
+            )
+            const audioFormat = allFormats.find((f: any) => f.acodec !== "none" && f.vcodec === "none" && f.abr)
+
+            const videoSize = videoFormat?.filesize || 0
+            const audioSize = audioFormat?.filesize || 0
+            return videoSize + audioSize
+          }
+
+          // Find audio-only format size
+          const audioFormat =
+            allFormats.find((f: any) => f.acodec !== "none" && f.vcodec === "none" && f.ext === "webm") ||
+            allFormats.find((f: any) => f.acodec !== "none" && f.vcodec === "none")
+
+          // Find best overall format
+          const bestFormat = allFormats.find((f: any) => f.format_id === info.format_id)
+
           resolve({
             id: info.id,
             title: info.title,
@@ -48,12 +87,23 @@ function getVideoInfo(url: string): Promise<Record<string, unknown>> {
             uploader: info.uploader,
             view_count: info.view_count,
             description: info.description,
+            fileSizes: {
+              "1080": formatFileSize(findBestVideoFormat(1080)),
+              "720": formatFileSize(findBestVideoFormat(720)),
+              "480": formatFileSize(findBestVideoFormat(480)),
+              "360": formatFileSize(findBestVideoFormat(360)),
+              best: formatFileSize(bestFormat?.filesize || findBestVideoFormat(2160)),
+              mp3: formatFileSize(audioFormat?.filesize),
+            },
             formats: info.formats?.map((f: Record<string, unknown>) => ({
               format_id: f.format_id,
               ext: f.ext,
               resolution: f.resolution || `${f.width}x${f.height}`,
               filesize: f.filesize,
               format_note: f.format_note,
+              height: f.height,
+              acodec: f.acodec,
+              vcodec: f.vcodec,
             })),
           })
         } catch {
